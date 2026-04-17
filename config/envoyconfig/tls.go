@@ -294,6 +294,38 @@ func (b *Builder) buildDownstreamTLSContextMulti(
 	return dtc, nil
 }
 
+// buildDownstreamTLSContextMultiForSNI builds a TLS context for SNI-filtered filter chains.
+// When requestClientCert is true, includes the client CA so Envoy requests client certificates.
+// When false, creates a TLS context without client cert request (for fallback filter chains).
+func (b *Builder) buildDownstreamTLSContextMultiForSNI(
+	ctx context.Context,
+	cfg *config.Config,
+	certs []tls.Certificate,
+	requestClientCert bool,
+) (*envoy_extensions_transport_sockets_tls_v3.DownstreamTlsContext, error) {
+	envoyCerts, err := b.envoyTLSCertificatesFromGoTLSCertificates(ctx, certs)
+	if err != nil {
+		return nil, err
+	}
+	dtc := &envoy_extensions_transport_sockets_tls_v3.DownstreamTlsContext{
+		CommonTlsContext: &envoy_extensions_transport_sockets_tls_v3.CommonTlsContext{
+			TlsParams:       tlsDownstreamParams,
+			TlsCertificates: envoyCerts,
+			AlpnProtocols:   getALPNProtos(cfg.Options),
+		},
+	}
+
+	if requestClientCert {
+		// Build validation context with client CA (Envoy will request client certs)
+		b.buildDownstreamValidationContext(ctx, dtc, cfg)
+	} else {
+		// No client cert request for this filter chain - don't add validation context
+		// This means Envoy won't request client certificates for matching connections
+	}
+
+	return dtc, nil
+}
+
 func getALPNProtos(opts *config.Options) []string {
 	switch opts.GetCodecType() {
 	case config.CodecTypeHTTP1:
