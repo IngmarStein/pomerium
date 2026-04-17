@@ -2,6 +2,7 @@ package envoyconfig
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"time"
 
@@ -111,19 +112,79 @@ func (b *Builder) buildMainTLSListener(
 		return nil, err
 	}
 
-	tlsContext, err := b.buildDownstreamTLSContextMulti(ctx, cfg, allCertificates)
-	if err != nil {
-		return nil, err
-	}
+	// If TLSClientAuthSNIs is configured, split into two filter chains:
+	// one for SNIs that request client certs, one for the rest.
+	if len(cfg.Options.DownstreamMTLS.TLSClientAuthSNIs) > 0 {
+		// Build filter chain that REQUESTS client certs (matched by SNI)
+		requestCertFilterChain, err := b.buildSNIFilteredTLSFilterChain(ctx, cfg, allCertificates, true)
+		if err != nil {
+			return nil, err
+		}
+		li.FilterChains = append(li.FilterChains, requestCertFilterChain)
 
-	transportSocket := newDownstreamTLSTransportSocket(tlsContext)
-	filterChain, err := b.buildMainHTTPConnectionManagerFilterChain(ctx, cfg, fullyStatic, false, transportSocket)
-	if err != nil {
-		return nil, err
+		// Build filter chain that does NOT request client certs (fallback)
+		fallbackFilterChain, err := b.buildSNIFilteredTLSFilterChain(ctx, cfg, allCertificates, false)
+		if err != nil {
+			return nil, err
+		}
+		li.FilterChains = append(li.FilterChains, fallbackFilterChain)
+	} else {
+		// Original behavior: single filter chain with client cert request
+		tlsContext, err := b.buildDownstreamTLSContextMulti(ctx, cfg, allCertificates)
+		if err != nil {
+			return nil, err
+		}
+
+		transportSocket := newDownstreamTLSTransportSocket(tlsContext)
+		filterChain, err := b.buildMainHTTPConnectionManagerFilterChain(ctx, cfg, fullyStatic, false, transportSocket)
+		if err != nil {
+			return nil, err
+		}
+		li.FilterChains = append(li.FilterChains, filterChain)
 	}
-	li.FilterChains = append(li.FilterChains, filterChain)
 
 	return li, nil
+}
+
+// buildSNIFilteredTLSFilterChain builds a filter chain for the main HTTPS listener.
+// When requestClientCert is true, the filter chain requests client certificates
+// for SNIs matching the configured patterns. When false, it creates a fallback
+// filter chain (no SNI match) that does not request client certificates.
+func (b *Builder) buildSNIFilteredTLSFilterChain(
+	ctx context.Context,
+	cfg *config.Config,
+	allCertificates []tls.Certificate,
+	requestClientCert bool,
+) (*envoy_config_listener_v3.FilterChain, error) {
+	tlsContext, err := b.buildDownstreamTLSContextMultiForSNI(ctx, cfg, allCertificates, requestClientCert)
+	if err != nil {
+		return nil, err
+	}
+
+	var filterChainMatch *envoy_config_listener_v3.FilterChainMatch
+	if requestClientCert {
+		// Create SNI matcher for the configured patterns
+		serverNames := make([]string, 0, len(cfg.Options.DownstreamMTLS.TLSClientAuthSNIs))
+		for _, pattern := range cfg.Options.DownstreamMTLS.TLSClientAuthSNIs {
+			serverNames = append(serverNames, pattern)
+		}
+		filterChainMatch = &envoy_config_listener_v3.FilterChainMatch{
+			ServerNames: serverNames,
+		}
+	}
+	// When !requestClientCert, filterChainMatch is nil (fallback catches all)
+
+	transportSocket := newDownstreamTLSTransportSocket(tlsContext)
+	filter, err := b.buildMainHTTPConnectionManagerFilter(ctx, cfg, false, false)
+	if err != nil {
+		return nil, err
+	}
+
+	return &envoy_config_listener_v3.FilterChain{
+		FilterChainMatch: filterChainMatch,
+		Filters:         []*envoy_config_listener_v3.Filter{filter},
+		TransportSocket: transportSocket,
+	}, nil
 }
 
 func (b *Builder) buildMainHTTPConnectionManagerFilterChain(

@@ -130,6 +130,31 @@ func (b *Builder) buildSubjectNameIndication(
 	return sni
 }
 
+// buildSNIFromGlob converts a glob pattern to an Envoy StringMatcher for SNI matching.
+// Supports wildcard patterns like "*.example.com" and exact matches.
+func buildSNIFromGlob(pattern string) *envoy_type_matcher_v3.StringMatcher {
+	if strings.Contains(pattern, "*") {
+		// Convert glob to regex: *.example.com -> .*\.example\.com
+		re := regexp.QuoteMeta(pattern)
+		re = strings.ReplaceAll(re, "\\*", ".*")
+		return &envoy_type_matcher_v3.StringMatcher{
+			MatchPattern: &envoy_type_matcher_v3.StringMatcher_SafeRegex{
+				SafeRegex: &envoy_type_matcher_v3.RegexMatcher{
+					EngineType: &envoy_type_matcher_v3.RegexMatcher_GoogleRe2{
+						GoogleRe2: &envoy_type_matcher_v3.RegexMatcher_GoogleRE2{},
+					},
+					Regex: "^" + re + "$",
+				},
+			},
+		}
+	}
+	return &envoy_type_matcher_v3.StringMatcher{
+		MatchPattern: &envoy_type_matcher_v3.StringMatcher_Exact{
+			Exact: pattern,
+		},
+	}
+}
+
 func (b *Builder) envoyTLSCertificateFromGoTLSCertificate(
 	ctx context.Context,
 	cert *tls.Certificate,
@@ -291,6 +316,38 @@ func (b *Builder) buildDownstreamTLSContextMulti(
 		},
 	}
 	b.buildDownstreamValidationContext(ctx, dtc, cfg)
+	return dtc, nil
+}
+
+// buildDownstreamTLSContextMultiForSNI builds a TLS context for SNI-filtered filter chains.
+// When requestClientCert is true, includes the client CA so Envoy requests client certificates.
+// When false, creates a TLS context without client cert request (for fallback filter chains).
+func (b *Builder) buildDownstreamTLSContextMultiForSNI(
+	ctx context.Context,
+	cfg *config.Config,
+	certs []tls.Certificate,
+	requestClientCert bool,
+) (*envoy_extensions_transport_sockets_tls_v3.DownstreamTlsContext, error) {
+	envoyCerts, err := b.envoyTLSCertificatesFromGoTLSCertificates(ctx, certs)
+	if err != nil {
+		return nil, err
+	}
+	dtc := &envoy_extensions_transport_sockets_tls_v3.DownstreamTlsContext{
+		CommonTlsContext: &envoy_extensions_transport_sockets_tls_v3.CommonTlsContext{
+			TlsParams:       tlsDownstreamParams,
+			TlsCertificates: envoyCerts,
+			AlpnProtocols:   getALPNProtos(cfg.Options),
+		},
+	}
+
+	if requestClientCert {
+		// Build validation context with client CA (Envoy will request client certs)
+		b.buildDownstreamValidationContext(ctx, dtc, cfg)
+	} else {
+		// No client cert request for this filter chain - don't add validation context
+		// This means Envoy won't request client certificates for matching connections
+	}
+
 	return dtc, nil
 }
 

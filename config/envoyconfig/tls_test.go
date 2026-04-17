@@ -72,6 +72,54 @@ func TestBuildSubjectNameIndication(t *testing.T) {
 	assert.Equal(t, "example.example.org", b.buildSubjectNameIndication(&url.URL{Host: "example.com:1234"}, "*.example.org"))
 }
 
+func TestBuildSNIFromGlob(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		pattern   string
+		expected  string
+		wantRegex bool
+	}{
+		{
+			pattern:   "auth.example.com",
+			expected:  "auth.example.com",
+			wantRegex: false,
+		},
+		{
+			pattern:   "*.example.com",
+			expected:  "^.*\\.example\\.com$",
+			wantRegex: true,
+		},
+		{
+			pattern:   "*.",
+			expected:  "^.*\\.$",
+			wantRegex: true,
+		},
+		{
+			pattern:   "server-*.example.com",
+			expected:  "^server-.*\\.example\\.com$",
+			wantRegex: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.pattern, func(t *testing.T) {
+			matcher := buildSNIFromGlob(tc.pattern)
+			require.NotNil(t, matcher)
+
+			if tc.wantRegex {
+				regex := matcher.GetSafeRegex()
+				require.NotNil(t, regex)
+				assert.Equal(t, tc.expected, regex.Regex)
+			} else {
+				exact := matcher.GetExact()
+				require.NotNil(t, exact)
+				assert.Equal(t, tc.expected, exact)
+			}
+		})
+	}
+}
+
 func TestValidateCertificate(t *testing.T) {
 	t.Parallel()
 
